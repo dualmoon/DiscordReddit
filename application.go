@@ -35,6 +35,16 @@ type EmbedAuthor struct {
 	IconURL      string `json:"icon_url,omitempty"`
 	ProxyIconURL string `json:"proxy_icon_url,omitempty"`
 }
+type Bookmark struct {
+	LastID string
+}
+
+func (bookmark *Bookmark) getLastID (session *geddit.OAuthSession, subreddit string) string {
+	optLimit1 := geddit.ListingOptions{Limit: 1}
+	submissions,_ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optLimit1)
+	bookmark.LastID = submissions[0].FullID
+	return bookmark.LastID
+}
 
 func main() {
 
@@ -52,8 +62,8 @@ func main() {
 	discordWebhookSecret := os.Getenv("DISCORD_WEBHOOK_SECRET")
 
 	// Variables
-	var lastID string
 	var tickRate time.Duration = 1 * time.Minute
+	bookmark := new(Bookmark)
 
 	// Configuration
 	webhookBaseURL := "https://discordapp.com/api/v7/webhooks/"
@@ -63,7 +73,7 @@ func main() {
 	iconURL := "https://i.imgur.com/3NtinwD.png"
 
 	// New oAuth session for Reddit API
-	o, err := geddit.NewOAuthSession(
+	session, err := geddit.NewOAuthSession(
 		redditClient,
 		redditSecret,
 		"brdecho v0.02",
@@ -74,28 +84,20 @@ func main() {
 	}
 
 	// Create new auth token for confidential clients (personal scripts/apps).
-	err = o.LoginAuth(redditUsername, redditPassword)
+	err = session.LoginAuth(redditUsername, redditPassword)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Set listing options
-	optLimit1 := geddit.ListingOptions{Limit: 1}
-	// Get latest submissions
-	submissions, _ := o.SubredditSubmissions(subreddit, geddit.NewSubmissions, optLimit1)
-	// TODO: do this a better way?
-	for _, s := range submissions {
-		lastID = s.FullID
-		fmt.Printf("[DEBUG] FullID: %v is last item.\n", s.FullID)
-	}
+	bookmark.getLastID(session, subreddit)
 
 	timer := time.Tick(tickRate)
 	for now := range timer {
 		fmt.Printf("[DEBUG] now: %v\n", now)
-		optBefore := geddit.ListingOptions{Before: lastID, Limit: 1}
-		submissions, _ := o.SubredditSubmissions(subreddit, geddit.NewSubmissions, optBefore)
+		optBefore := geddit.ListingOptions{Before: bookmark.LastID, Limit: 1}
+		submissions, _ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optBefore)
 		for _, s := range submissions {
-			lastID = s.FullID
+			bookmark.LastID = s.FullID
 			fmt.Printf("[DEBUG] New FullID is: %v\nThumbnail URL is: %s\n", s.FullID, s.ThumbnailURL)
 
 			// Process submission to send to webhook
@@ -139,8 +141,8 @@ func main() {
 			fmt.Printf("[INFO] post response: %s\n", body_byte)
 
 			// Look ahead to see if there's more submissions to process
-			optInnerBefore := geddit.ListingOptions{Before: lastID}
-			submissions, _ := o.SubredditSubmissions("shitredditsays", geddit.NewSubmissions, optInnerBefore)
+			optInnerBefore := geddit.ListingOptions{Before: bookmark.LastID}
+			submissions, _ := session.SubredditSubmissions("shitredditsays", geddit.NewSubmissions, optInnerBefore)
 			if len(submissions) > 0 {
 				fmt.Printf("[WARNING] %v left to process\n", len(submissions))
 			}
