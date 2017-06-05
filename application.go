@@ -46,6 +46,22 @@ func (bookmark *Bookmark) getLastID (session *geddit.OAuthSession, subreddit str
 	return bookmark.LastID
 }
 
+// Custom logging function
+type Clog struct {}
+
+func (Clog) debug(message string) {
+	fmt.Printf("[DEBUG] %v\n", message)
+}
+func (Clog) info(message string) {
+	fmt.Printf("[INFO] %v\n", message)
+}
+func (Clog) warn(message string) {
+	fmt.Printf("[WARNING] %v\n", message)
+}
+func (Clog) err(message string) {
+	fmt.Printf("[ERROR] %v\n", message)
+}
+
 func main() {
 
 	// Load .env
@@ -64,6 +80,7 @@ func main() {
 	// Variables
 	var tickRate time.Duration = 1 * time.Minute
 	bookmark := new(Bookmark)
+	optBefore := geddit.ListingOptions{Before: bookmark.LastID, Limit: 1}
 
 	// Configuration
 	webhookBaseURL := "https://discordapp.com/api/v7/webhooks/"
@@ -94,7 +111,6 @@ func main() {
 	timer := time.Tick(tickRate)
 	for now := range timer {
 		fmt.Printf("[DEBUG] now: %v\n", now)
-		optBefore := geddit.ListingOptions{Before: bookmark.LastID, Limit: 1}
 		submissions, _ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optBefore)
 		for _, s := range submissions {
 			bookmark.LastID = s.FullID
