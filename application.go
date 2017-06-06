@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/joho/godotenv"
 	"github.com/jzelinskie/geddit"
@@ -39,15 +40,15 @@ type Bookmark struct {
 	LastID string
 }
 
-func (bookmark *Bookmark) getLastID (session *geddit.OAuthSession, subreddit string) string {
+func (bookmark *Bookmark) getLastID(session *geddit.OAuthSession, subreddit string) string {
 	optLimit1 := geddit.ListingOptions{Limit: 1}
-	submissions,_ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optLimit1)
+	submissions, _ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optLimit1)
 	bookmark.LastID = submissions[0].FullID
 	return bookmark.LastID
 }
 
 // Custom logging function
-type Clog struct {}
+type Clog struct{}
 
 func (Clog) debug(message string) {
 	fmt.Printf("[DEBUG] %v\n", message)
@@ -58,16 +59,22 @@ func (Clog) info(message string) {
 func (Clog) warn(message string) {
 	fmt.Printf("[WARNING] %v\n", message)
 }
-func (Clog) err(message string) {
-	fmt.Printf("[ERROR] %v\n", message)
+func (Clog) err(error error) {
+	log.Fatal(fmt.Sprintf("[ERROR] %v\n", error))
 }
 
 func main() {
 
+	// Variables
+	var tickRate time.Duration = 1 * time.Minute
+	var optBefore geddit.ListingOptions
+	bookmark := new(Bookmark)
+	clog := new(Clog)
+
 	// Load .env
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		clog.err(errors.New(fmt.Sprintf("Error loading .env file: %v", err)))
 	}
 
 	redditClient := os.Getenv("REDDIT_CLIENT")
@@ -76,11 +83,6 @@ func main() {
 	redditPassword := os.Getenv("REDDIT_PASSWORD")
 	discordWebhookClient := os.Getenv("DISCORD_WEBHOOK_CLIENT")
 	discordWebhookSecret := os.Getenv("DISCORD_WEBHOOK_SECRET")
-
-	// Variables
-	var tickRate time.Duration = 1 * time.Minute
-	bookmark := new(Bookmark)
-	optBefore := geddit.ListingOptions{Before: bookmark.LastID, Limit: 1}
 
 	// Configuration
 	webhookBaseURL := "https://discordapp.com/api/v7/webhooks/"
@@ -97,71 +99,87 @@ func main() {
 		"http://airsi.de",
 	)
 	if err != nil {
-		log.Fatal(err)
+		clog.err(errors.New(fmt.Sprintf("Error in creating Reddit session object: %v", err)))
 	}
 
 	// Create new auth token for confidential clients (personal scripts/apps).
 	err = session.LoginAuth(redditUsername, redditPassword)
 	if err != nil {
-		log.Fatal(err)
+		clog.err(errors.New(fmt.Sprintf("Error logging in to Reddit: %v", err)))
 	}
 
+	// Get our initial bookmark
 	bookmark.getLastID(session, subreddit)
 
+	// Main loop
 	timer := time.Tick(tickRate)
 	for now := range timer {
-		fmt.Printf("[DEBUG] now: %v\n", now)
-		submissions, _ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optBefore)
-		for _, s := range submissions {
-			bookmark.LastID = s.FullID
-			fmt.Printf("[DEBUG] New FullID is: %v\nThumbnail URL is: %s\n", s.FullID, s.ThumbnailURL)
+		clog.debug(fmt.Sprintf("now: %v", now))
 
-			// Process submission to send to webhook
-			// Prep a HTTP form data object
-			embeds := EmbedData{Embeds: []Embed{
-				{
-					Title: fmt.Sprintf("New post to r/%v", subredditPretty),
-					URL:   s.FullPermalink(),
-					Color: "16763904",
-					//	Description: s.URL,
-					Fields: []EmbedField{
-						{
-							Name:   s.Title,
-							Value:  s.URL,
-							Inline: false,
-						},
-					},
-					Author: EmbedAuthor{
-						Name:    s.Author,
-						URL:     fmt.Sprintf("https://www.reddit.com/user/%s/", s.Author),
-						IconURL: iconURL,
+		// Get submissions since our bookmark
+		submissions, _ := session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optBefore)
+
+		// If there's no new submissions, move on
+		if len(submissions) < 1 {
+			clog.debug("No new submissions. Continuing.")
+			continue
+		}
+
+		// Only work with the next submission
+		submission := submissions[0]
+		// Update bookmark
+		bookmark.LastID = submission.FullID
+		optBefore = geddit.ListingOptions{Before: bookmark.LastID, Limit: 1}
+		clog.debug(fmt.Sprintf("New FullID is: %v, Thumbnail URL is: %s", submission.FullID, submission.ThumbnailURL))
+
+		/// Process submission to send to webhook
+		// Prep a HTTP form data object
+		embeds := EmbedData{Embeds: []Embed{
+			{
+				Title: fmt.Sprintf("New post to r/%v", subredditPretty),
+				URL:   submission.FullPermalink(),
+				Color: "16763904",
+				//	Description: s.URL,
+				Fields: []EmbedField{
+					{
+						Name:   submission.Title,
+						Value:  submission.URL,
+						Inline: false,
 					},
 				},
-			}}
+				Author: EmbedAuthor{
+					Name:    submission.Author,
+					URL:     fmt.Sprintf("https://www.reddit.com/user/%s/", submission.Author),
+					IconURL: iconURL,
+				},
+			},
+		}}
 
-			// Create json byte data for body
-			jsonEmbeds, err := json.Marshal(embeds)
-			fmt.Printf("[DEBUG] json embeds data: %s\n", jsonEmbeds)
+		// Create json byte data for body
+		jsonEmbeds, err := json.Marshal(embeds)
+		if err != nil {
+			clog.err(errors.New(fmt.Sprintf("Error marshalling JSON data: %v", err)))
+		}
+		clog.debug(fmt.Sprintf("json embeds data: %s", jsonEmbeds))
 
-			// POST to Discord
-			rsp, err := http.Post(requestUrl, "application/json", bytes.NewBuffer(jsonEmbeds))
-			if err != nil {
-				log.Fatal(err)
-			}
-			body_byte, err := ioutil.ReadAll(rsp.Body)
-			if err != nil {
-				log.Fatal(err)
-			}
+		// POST to Discord
+		response, err := http.Post(requestUrl, "application/json", bytes.NewBuffer(jsonEmbeds))
+		if err != nil {
+			clog.err(errors.New(fmt.Sprintf("Error in HTTP POST to Discord: %v", err)))
+		}
+		body_byte, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			clog.err(errors.New(fmt.Sprintf("Error from Discord after HTTP POST: %v", err)))
+		}
 
-			// Print POST response
-			fmt.Printf("[INFO] post response: %s\n", body_byte)
+		// Print POST response
+		clog.info(fmt.Sprintf("post response: %s", body_byte))
 
-			// Look ahead to see if there's more submissions to process
-			optInnerBefore := geddit.ListingOptions{Before: bookmark.LastID}
-			submissions, _ := session.SubredditSubmissions("shitredditsays", geddit.NewSubmissions, optInnerBefore)
-			if len(submissions) > 0 {
-				fmt.Printf("[WARNING] %v left to process\n", len(submissions))
-			}
+		// Look ahead to see if there's more submissions to process
+		optInnerBefore := geddit.ListingOptions{Before: bookmark.LastID}
+		submissions, _ = session.SubredditSubmissions(subreddit, geddit.NewSubmissions, optInnerBefore)
+		if len(submissions) > 0 {
+			clog.warn(fmt.Sprintf("%v submissions left to process", len(submissions)))
 		}
 	} // main loop
 }
